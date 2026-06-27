@@ -1,0 +1,453 @@
+// Prisma schema — sole DDL owner per persistence-migration-policy.md.
+// Translated from docs/architecture/data-model.md (MVP tables 1-17; transfer_records/settlements are 二期, not modeled here).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  sales
+  logistics
+  manager
+
+  @@map("user_role")
+}
+
+enum SettlementType {
+  single
+  monthly
+
+  @@map("settlement_type")
+}
+
+enum AddressType {
+  delivery
+  invoice
+
+  @@map("address_type")
+}
+
+enum OrderStatus {
+  pending
+  confirmed
+  shipped
+  delivered
+  invoiced
+  settled
+  cancelled
+
+  @@map("order_status")
+}
+
+enum DeliveryTaskStatus {
+  pending_schedule
+  scheduled
+  shipped
+  delivered
+  cancelled
+
+  @@map("delivery_task_status")
+}
+
+enum Gender {
+  M
+  F
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique @db.VarChar(50)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  displayName  String   @map("display_name") @db.VarChar(50)
+  role         UserRole
+  wechatId     String?  @map("wechat_id") @db.VarChar(100)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  sessions             Session[]
+  primaryCustomers     Customer[]              @relation("CustomerPrimarySalesRep")
+  salesOrders          Order[]                 @relation("OrderSalesRep")
+  enteredBatches       InventoryBatch[]        @relation("InventoryBatchEnteredBy")
+  createdPriceRules    PriceListEntry[]        @relation("PriceListCreatedBy")
+  orderStatusChanges   OrderStatusLog[]        @relation("OrderStatusLogChangedBy")
+  stockDeductionsDone  StockDeduction[]        @relation("StockDeductionConfirmedBy")
+  documentReleasesDone DocumentReleaseReason[] @relation("DocumentReleaseReleasedBy")
+  uploadedCertificates Certificate[]           @relation("CertificateUploadedBy")
+  uploadedDocuments    Document[]              @relation("DocumentUploadedBy")
+  auditLogEntries      AuditLog[]              @relation("AuditLogUser")
+  idempotencyKeys      IdempotencyKey[]        @relation("IdempotencyKeyActor")
+
+  @@map("users")
+}
+
+model Session {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  tokenHash String   @unique @map("token_hash") @db.VarChar(255)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Species {
+  id        Int    @id @default(autoincrement())
+  name      String @unique @db.VarChar(50)
+  grade     String @db.VarChar(20)
+  sortOrder Int    @default(0) @map("sort_order")
+
+  strains Strain[]
+
+  @@map("species")
+}
+
+model Strain {
+  id        Int      @id @default(autoincrement())
+  speciesId Int      @map("species_id")
+  name      String   @db.VarChar(100)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  species          Species          @relation(fields: [speciesId], references: [id])
+  priceList        PriceListEntry[]
+  inventoryBatches InventoryBatch[]
+  orderItems       OrderItem[]
+
+  @@unique([speciesId, name])
+  @@index([speciesId])
+  @@index([isActive])
+  @@map("strains")
+}
+
+model PriceListEntry {
+  id            Int      @id @default(autoincrement())
+  strainId      Int      @map("strain_id")
+  ageWeeks      Int      @map("age_weeks")
+  unitPrice     Decimal  @map("unit_price") @db.Decimal(10, 2)
+  effectiveFrom DateTime @map("effective_from") @db.Date
+  createdById   Int?     @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  strain    Strain @relation(fields: [strainId], references: [id])
+  createdBy User?  @relation("PriceListCreatedBy", fields: [createdById], references: [id])
+
+  @@unique([strainId, ageWeeks, effectiveFrom])
+  @@index([strainId, ageWeeks, effectiveFrom])
+  @@map("price_list")
+}
+
+model InventoryBatch {
+  id          Int      @id @default(autoincrement())
+  strainId    Int      @map("strain_id")
+  birthDate   DateTime @map("birth_date") @db.Date
+  gender      Gender
+  initialQty  Int      @map("initial_qty")
+  reservedQty Int      @default(0) @map("reserved_qty")
+  entryDate   DateTime @map("entry_date") @db.Date
+  enteredById Int?     @map("entry_by")
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  strain          Strain           @relation(fields: [strainId], references: [id])
+  enteredBy       User?            @relation("InventoryBatchEnteredBy", fields: [enteredById], references: [id])
+  stockDeductions StockDeduction[]
+  reservationAllocations ReservationAllocation[]
+
+  @@index([strainId, gender, birthDate])
+  @@map("inventory_batches")
+}
+
+model Customer {
+  id                 Int            @id @default(autoincrement())
+  primarySalesRepId  Int?           @map("primary_sales_rep_id")
+  geoArea            String?        @map("geo_area") @db.VarChar(100)
+  name               String         @db.VarChar(200)
+  unitName           String?        @map("unit_name") @db.VarChar(200)
+  researchGroup      String?        @map("research_group") @db.VarChar(200)
+  settlementType     SettlementType @default(single) @map("settlement_type")
+  creditDays         Int            @default(60) @map("credit_days")
+  defaultDelivery    String         @default("135") @map("default_delivery") @db.VarChar(20)
+  defaultInvoiceType String?        @map("default_invoice_type") @db.VarChar(20)
+  notes              String?        @db.Text
+  isActive           Boolean        @default(true) @map("is_active")
+  createdAt          DateTime       @default(now()) @map("created_at")
+
+  primarySalesRep User?             @relation("CustomerPrimarySalesRep", fields: [primarySalesRepId], references: [id])
+  contacts        CustomerContact[]
+  addresses       CustomerAddress[]
+  orders          Order[]
+
+  @@index([geoArea])
+  @@index([name])
+  @@index([isActive])
+  @@map("customers")
+}
+
+model CustomerContact {
+  id         Int      @id @default(autoincrement())
+  customerId Int      @map("customer_id")
+  name       String   @db.VarChar(100)
+  role       String?  @db.VarChar(50)
+  phone      String?  @db.VarChar(30)
+  wechat     String?  @db.VarChar(100)
+  email      String?  @db.VarChar(200)
+  isPrimary  Boolean  @default(false) @map("is_primary")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
+  @@map("customer_contacts")
+}
+
+model CustomerAddress {
+  id          Int         @id @default(autoincrement())
+  customerId  Int         @map("customer_id")
+  addressType AddressType @map("address_type")
+  detail      String      @db.Text
+  isDefault   Boolean     @default(false) @map("is_default")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  customer Customer @relation(fields: [customerId], references: [id])
+
+  @@index([customerId])
+  @@index([addressType])
+  @@map("customer_addresses")
+}
+
+model Order {
+  id             Int         @id @default(autoincrement())
+  orderNumber    String      @unique @map("order_number") @db.VarChar(20)
+  customerId     Int         @map("customer_id")
+  salesRepId     Int         @map("sales_rep_id")
+  status         OrderStatus @default(pending)
+  deliveryMethod String?     @map("delivery_method") @db.VarChar(20)
+  deliveryDate   DateTime?   @map("delivery_date") @db.Date
+  requiresInvoice Boolean     @default(false) @map("requires_invoice")
+  invoiceType    String?     @map("invoice_type") @db.VarChar(20)
+  notes          String?     @db.Text
+  totalAmount    Decimal     @default(0) @map("total_amount") @db.Decimal(12, 2)
+  createdAt      DateTime    @default(now()) @map("created_at")
+  updatedAt      DateTime    @updatedAt @map("updated_at")
+
+  customer               Customer                @relation(fields: [customerId], references: [id])
+  salesRep               User                    @relation("OrderSalesRep", fields: [salesRepId], references: [id])
+  items                  OrderItem[]
+  statusLog              OrderStatusLog[]
+  deliveryTask           DeliveryTask?
+  documentReleaseReasons DocumentReleaseReason[]
+  certificates           Certificate[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+  @@index([salesRepId])
+  @@map("orders")
+}
+
+model OrderItem {
+  id          Int      @id @default(autoincrement())
+  orderId     Int      @map("order_id")
+  strainId    Int      @map("strain_id")
+  ageWeeks    Int      @map("age_weeks")
+  gender      Gender
+  quantity    Int
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(10, 2)
+  actualPrice Decimal  @map("actual_price") @db.Decimal(10, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  order           Order            @relation(fields: [orderId], references: [id])
+  strain          Strain           @relation(fields: [strainId], references: [id])
+  stockDeductions StockDeduction[]
+  reservationAllocations ReservationAllocation[]
+
+  @@index([orderId])
+  @@index([strainId, ageWeeks, gender])
+  @@map("order_items")
+}
+
+model OrderStatusLog {
+  id          Int      @id @default(autoincrement())
+  orderId     Int      @map("order_id")
+  fromStatus  String?  @map("from_status") @db.VarChar(20)
+  toStatus    String   @map("to_status") @db.VarChar(20)
+  changedById Int?     @map("changed_by")
+  reason      String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  order     Order @relation(fields: [orderId], references: [id])
+  changedBy User? @relation("OrderStatusLogChangedBy", fields: [changedById], references: [id])
+
+  @@index([orderId])
+  @@map("order_status_log")
+}
+
+model DeliveryTask {
+  id                  Int                @id @default(autoincrement())
+  orderId             Int                @unique @map("order_id")
+  status              DeliveryTaskStatus @default(pending_schedule)
+  plannedDeliveryDate DateTime?          @map("planned_delivery_date") @db.Date
+  vehicle             String?            @db.VarChar(100)
+  driver              String?            @db.VarChar(100)
+  deliveryBatch       String?            @map("delivery_batch") @db.VarChar(50)
+  routeNotes          String?            @map("route_notes") @db.Text
+  salesActionRequired Boolean            @default(false) @map("sales_action_required")
+  salesActionNote     String?            @map("sales_action_note") @db.Text
+  shippedAt           DateTime?          @map("shipped_at")
+  deliveredAt         DateTime?          @map("delivered_at")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
+
+  order                  Order                   @relation(fields: [orderId], references: [id])
+  stockDeductions        StockDeduction[]
+  documentReleaseReasons DocumentReleaseReason[]
+
+  @@index([status])
+  @@index([plannedDeliveryDate])
+  @@index([deliveryBatch])
+  @@map("delivery_tasks")
+}
+
+model StockDeduction {
+  id               Int      @id @default(autoincrement())
+  deliveryTaskId   Int      @map("delivery_task_id")
+  orderItemId      Int      @map("order_item_id")
+  inventoryBatchId Int      @map("inventory_batch_id")
+  quantity         Int
+  confirmedById    Int      @map("confirmed_by")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  deliveryTask   DeliveryTask   @relation(fields: [deliveryTaskId], references: [id])
+  orderItem      OrderItem      @relation(fields: [orderItemId], references: [id])
+  inventoryBatch InventoryBatch @relation(fields: [inventoryBatchId], references: [id])
+  confirmedBy    User           @relation("StockDeductionConfirmedBy", fields: [confirmedById], references: [id])
+
+  @@index([deliveryTaskId])
+  @@index([orderItemId])
+  @@index([inventoryBatchId])
+  @@map("stock_deductions")
+}
+
+model ReservationAllocation {
+  id               Int      @id @default(autoincrement())
+  orderItemId      Int      @map("order_item_id")
+  inventoryBatchId Int      @map("inventory_batch_id")
+  quantity         Int
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  orderItem      OrderItem      @relation(fields: [orderItemId], references: [id])
+  inventoryBatch InventoryBatch @relation(fields: [inventoryBatchId], references: [id])
+
+  @@unique([orderItemId, inventoryBatchId])
+  @@index([inventoryBatchId])
+  @@map("reservation_allocations")
+}
+
+model DocumentReleaseReason {
+  id                 Int      @id @default(autoincrement())
+  deliveryTaskId     Int      @map("delivery_task_id")
+  orderId            Int      @map("order_id")
+  missingCertificate Boolean  @default(false) @map("missing_certificate")
+  missingInvoice     Boolean  @default(false) @map("missing_invoice")
+  reason             String   @db.Text
+  releasedById       Int      @map("released_by")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  deliveryTask DeliveryTask @relation(fields: [deliveryTaskId], references: [id])
+  order        Order        @relation(fields: [orderId], references: [id])
+  releasedBy   User         @relation("DocumentReleaseReleasedBy", fields: [releasedById], references: [id])
+
+  @@index([deliveryTaskId])
+  @@index([orderId])
+  @@map("document_release_reasons")
+}
+
+model Certificate {
+  id           Int      @id @default(autoincrement())
+  orderId      Int?     @map("order_id")
+  batchDesc    String?  @map("batch_desc") @db.VarChar(200)
+  filePath     String   @map("file_path") @db.VarChar(500)
+  fileName     String?  @map("file_name") @db.VarChar(200)
+  uploadedById Int?     @map("uploaded_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  order      Order? @relation(fields: [orderId], references: [id])
+  uploadedBy User?  @relation("CertificateUploadedBy", fields: [uploadedById], references: [id])
+
+  @@index([orderId])
+  @@map("certificates")
+}
+
+model Document {
+  id           Int      @id @default(autoincrement())
+  docType      String   @map("doc_type") @db.VarChar(30)
+  filePath     String   @map("file_path") @db.VarChar(500)
+  fileName     String?  @map("file_name") @db.VarChar(200)
+  description  String?  @db.VarChar(300)
+  uploadedById Int?     @map("uploaded_by")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  uploadedBy User? @relation("DocumentUploadedBy", fields: [uploadedById], references: [id])
+
+  @@map("documents")
+}
+
+
+model DeliveryStrategyRule {
+  id                Int      @id @default(autoincrement())
+  name              String   @db.VarChar(100)
+  geoArea           String?  @map("geo_area") @db.VarChar(100)
+  amountThreshold   Decimal? @map("amount_threshold") @db.Decimal(10, 2)
+  quantityThreshold Int?     @map("quantity_threshold")
+  suggestionText    String   @map("suggestion_text") @db.Text
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  @@index([geoArea])
+  @@index([isActive])
+  @@map("delivery_strategy_rules")
+}
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  userId     Int?     @map("user_id")
+  action     String   @db.VarChar(30)
+  entityType String   @map("entity_type") @db.VarChar(30)
+  entityId   Int?     @map("entity_id")
+  fieldName  String?  @map("field_name") @db.VarChar(50)
+  oldValue   String?  @map("old_value") @db.Text
+  newValue   String?  @map("new_value") @db.Text
+  reason     String?  @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User? @relation("AuditLogUser", fields: [userId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@index([userId])
+  @@map("audit_log")
+}
+model IdempotencyKey {
+  id               Int      @id @default(autoincrement())
+  actorId          Int      @map("actor_id")
+  endpoint         String   @db.VarChar(200)
+  idempotencyKey   String   @map("idempotency_key") @db.VarChar(200)
+  requestHash      String   @map("request_hash") @db.VarChar(64)
+  responseSnapshot Json     @map("response_snapshot")
+  createdAt        DateTime @default(now()) @map("created_at")
+  expiresAt        DateTime @map("expires_at")
+
+  actor User @relation("IdempotencyKeyActor", fields: [actorId], references: [id])
+
+  @@unique([actorId, endpoint, idempotencyKey])
+  @@index([expiresAt])
+  @@map("idempotency_keys")
+}

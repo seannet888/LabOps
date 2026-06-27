@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+test-results/
+tmp/
+.workbuddy/
+.env*
+!.env.example
+*.log
+*.db
+*.sqlite
+*.sqlite3
